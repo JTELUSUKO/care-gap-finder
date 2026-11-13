@@ -1,0 +1,14 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime outputs — the code recreates these folders on first run
+alerts/pending/
+alerts/sent/
+alerts/rejected/
+alerts/audit.log
+
+# macOS
+.DS_Store

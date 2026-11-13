@@ -1,0 +1,165 @@
+{
+    "entry": [
+        {
+            "resource": {
+                "birthDate": "1979-06-22",
+                "gender": "female",
+                "id": "patient-p003",
+                "identifier": [
+                    {
+                        "system": "http://example.org/fhir/mrn-synthetic",
+                        "type": {
+                            "text": "Medical Record Number"
+                        },
+                        "value": "MRN-SYN-003"
+                    }
+                ],
+                "name": [
+                    {
+                        "family": "Ruiz",
+                        "given": [
+                            "Elena"
+                        ]
+                    }
+                ],
+                "resourceType": "Patient"
+            }
+        },
+        {
+            "resource": {
+                "class": {
+                    "code": "AMB",
+                    "display": "ambulatory",
+                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode"
+                },
+                "id": "enc-p003-20260918",
+                "period": {
+                    "start": "2026-09-18"
+                },
+                "resourceType": "Encounter",
+                "status": "finished",
+                "subject": {
+                    "reference": "Patient/patient-p003"
+                },
+                "type": [
+                    {
+                        "text": "Office visit"
+                    }
+                ]
+            }
+        },
+        {
+            "resource": {
+                "code": {
+                    "coding": [
+                        {
+                            "code": "8480-6",
+                            "display": "Systolic blood pressure",
+                            "system": "http://loinc.org"
+                        }
+                    ]
+                },
+                "effectiveDateTime": "2026-09-18",
+                "id": "obs-p003-sbp-20260918",
+                "resourceType": "Observation",
+                "status": "final",
+                "subject": {
+                    "reference": "Patient/patient-p003"
+                },
+                "valueQuantity": {
+                    "code": "mm[Hg]",
+                    "system": "http://unitsofmeasure.org",
+                    "unit": "mmHg",
+                    "value": 118
+                }
+            }
+        },
+        {
+            "resource": {
+                "code": {
+                    "coding": [
+                        {
+                            "code": "8462-4",
+                            "display": "Diastolic blood pressure",
+                            "system": "http://loinc.org"
+                        }
+                    ]
+                },
+                "effectiveDateTime": "2026-09-18",
+                "id": "obs-p003-dbp-20260918",
+                "resourceType": "Observation",
+                "status": "final",
+                "subject": {
+                    "reference": "Patient/patient-p003"
+                },
+                "valueQuantity": {
+                    "code": "mm[Hg]",
+                    "system": "http://unitsofmeasure.org",
+                    "unit": "mmHg",
+                    "value": 76
+                }
+            }
+        },
+        {
+            "resource": {
+                "code": {
+                    "coding": [
+                        {
+                            "code": "2335-8",
+                            "display": "Hemoglobin [Presence] in Stool",
+                            "system": "http://loinc.org"
+                        }
+                    ],
+                    "text": "Fecal immunochemical test (FIT)"
+                },
+                "effectiveDateTime": "2026-01-12",
+                "id": "obs-p003-fit-20260112",
+                "resourceType": "Observation",
+                "status": "final",
+                "subject": {
+                    "reference": "Patient/patient-p003"
+                },
+                "valueString": "Negative"
+            }
+        },
+        {
+            "resource": {
+                "authoredOn": "2026-08-14",
+                "code": {
+                    "coding": [
+                        {
+                            "code": "3457005",
+                            "display": "Patient referral",
+                            "system": "http://snomed.info/sct"
+                        }
+                    ],
+                    "text": "Referral to cardiology service"
+                },
+                "id": "ref-p003-cardio",
+                "intent": "order",
+                "reasonCode": [
+                    {
+                        "text": "Chest pain on exertion \u2014 evaluate"
+                    }
+                ],
+                "resourceType": "ServiceRequest",
+                "status": "active",
+                "subject": {
+                    "reference": "Patient/patient-p003"
+                }
+            }
+        }
+    ],
+    "id": "bundle-p003",
+    "meta": {
+        "tag": [
+            {
+                "code": "HTEST",
+                "display": "test health data",
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActReason"
+            }
+        ]
+    },
+    "resourceType": "Bundle",
+    "type": "collection"
+}

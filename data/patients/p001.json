@@ -1,0 +1,140 @@
+{
+    "entry": [
+        {
+            "resource": {
+                "birthDate": "1968-04-15",
+                "gender": "female",
+                "id": "patient-p001",
+                "identifier": [
+                    {
+                        "system": "http://example.org/fhir/mrn-synthetic",
+                        "type": {
+                            "text": "Medical Record Number"
+                        },
+                        "value": "MRN-SYN-001"
+                    }
+                ],
+                "name": [
+                    {
+                        "family": "Santos",
+                        "given": [
+                            "Maria"
+                        ]
+                    }
+                ],
+                "resourceType": "Patient"
+            }
+        },
+        {
+            "resource": {
+                "class": {
+                    "code": "AMB",
+                    "display": "ambulatory",
+                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode"
+                },
+                "id": "enc-p001-20260910",
+                "period": {
+                    "start": "2026-09-10"
+                },
+                "resourceType": "Encounter",
+                "status": "finished",
+                "subject": {
+                    "reference": "Patient/patient-p001"
+                },
+                "type": [
+                    {
+                        "text": "Office visit"
+                    }
+                ]
+            }
+        },
+        {
+            "resource": {
+                "code": {
+                    "coding": [
+                        {
+                            "code": "73761001",
+                            "display": "Colonoscopy",
+                            "system": "http://snomed.info/sct"
+                        },
+                        {
+                            "code": "45378",
+                            "display": "Colonoscopy, flexible; diagnostic",
+                            "system": "http://www.ama-assn.org/go/cpt"
+                        }
+                    ],
+                    "text": "Colonoscopy"
+                },
+                "id": "proc-p001-colon-20240520",
+                "performedDateTime": "2024-05-20",
+                "resourceType": "Procedure",
+                "status": "completed",
+                "subject": {
+                    "reference": "Patient/patient-p001"
+                }
+            }
+        },
+        {
+            "resource": {
+                "authoredOn": "2025-11-03",
+                "code": {
+                    "coding": [
+                        {
+                            "code": "3457005",
+                            "display": "Patient referral",
+                            "system": "http://snomed.info/sct"
+                        }
+                    ],
+                    "text": "Referral to dermatology"
+                },
+                "id": "ref-p001-derm",
+                "intent": "order",
+                "resourceType": "ServiceRequest",
+                "status": "completed",
+                "subject": {
+                    "reference": "Patient/patient-p001"
+                }
+            }
+        },
+        {
+            "resource": {
+                "basedOn": [
+                    {
+                        "reference": "ServiceRequest/ref-p001-derm"
+                    }
+                ],
+                "class": {
+                    "code": "AMB",
+                    "display": "ambulatory",
+                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode"
+                },
+                "id": "enc-p001-derm-20251202",
+                "period": {
+                    "start": "2025-12-02"
+                },
+                "resourceType": "Encounter",
+                "status": "finished",
+                "subject": {
+                    "reference": "Patient/patient-p001"
+                },
+                "type": [
+                    {
+                        "text": "Dermatology visit"
+                    }
+                ]
+            }
+        }
+    ],
+    "id": "bundle-p001",
+    "meta": {
+        "tag": [
+            {
+                "code": "HTEST",
+                "display": "test health data",
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActReason"
+            }
+        ]
+    },
+    "resourceType": "Bundle",
+    "type": "collection"
+}
