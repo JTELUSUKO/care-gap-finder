@@ -15,9 +15,9 @@ use `app.py --as-of YYYY-MM-DD`, to evaluate against another date.
 The four rules (all use real standard codes — see data/patients/README.md):
   1. blood_pressure — no systolic BP Observation (LOINC 8480-6) in 12 months.
   2. hba1c — diabetes Condition present AND no HbA1c (LOINC 4548-4) in 6 months.
-  3. colorectal_screening — age 45-75 AND no colorectal screening on record.
+  3. colorectal_screening — age 45-75 AND no valid, in-window screening.
   4. open_referral — an active ServiceRequest with no follow-up Encounter
-     or Procedure referencing it.
+     or Procedure that is completed by the reference date.
 
 Severities: BP overdue 12 months = soon; HbA1c overdue = soon; open
 referral = routine; screening overdue = routine.
@@ -47,6 +47,9 @@ ICD10_SCREENING_COLON = "Z12.11"  # encounter for screening for colon cancer
 
 BP_WINDOW = timedelta(days=365)  # 12 months
 HBA1C_WINDOW = timedelta(days=183)  # ~6 months
+COLONOSCOPY_LOOKBACK_YEARS = 10
+FIT_LOOKBACK_YEARS = 1
+SCREENING_ENCOUNTER_LOOKBACK_YEARS = 1
 SCREENING_AGE_MIN = 45
 SCREENING_AGE_MAX = 75
 
@@ -63,7 +66,7 @@ def detect_gaps(bundle, as_of=DEFAULT_AS_OF):
     gaps.extend(_bp_gap(bundle, patient_id, as_of))
     gaps.extend(_hba1c_gap(bundle, patient_id, as_of))
     gaps.extend(_screening_gap(bundle, patient_id, as_of))
-    gaps.extend(_referral_gaps(bundle, patient_id))
+    gaps.extend(_referral_gaps(bundle, patient_id, as_of))
     return gaps
 
 
@@ -95,12 +98,19 @@ def _encounter_evidence(bundle):
 
 def _bp_gap(bundle, patient_id, as_of):
     """Rule 1: no systolic BP reading (LOINC 8480-6) in the last 12 months."""
-    systolic = fhir_loader.observations_by_loinc(bundle, LOINC_SYSTOLIC_BP)
+    all_systolic = fhir_loader.observations_by_loinc(bundle, LOINC_SYSTOLIC_BP)
+    systolic = fhir_loader.valid_observations(all_systolic, as_of)
     latest = fhir_loader.latest_observation_date(systolic)
     if latest is not None and as_of - latest <= BP_WINDOW:
         return []
     if latest is None:
-        detail = "No blood pressure reading on record at all."
+        if all_systolic:
+            detail = (
+                "No final, validly dated blood pressure reading on or before "
+                f"{as_of.isoformat()}."
+            )
+        else:
+            detail = "No blood pressure reading on record at all."
     else:
         detail = f"Last blood pressure reading was {latest.isoformat()}."
     return [
@@ -121,7 +131,8 @@ def _hba1c_gap(bundle, patient_id, as_of):
     """Rule 2: diabetes + no HbA1c (LOINC 4548-4) in the last 6 months."""
     if not fhir_loader.has_diabetes(bundle):
         return []
-    hba1c = fhir_loader.observations_by_loinc(bundle, LOINC_HBA1C)
+    all_hba1c = fhir_loader.observations_by_loinc(bundle, LOINC_HBA1C)
+    hba1c = fhir_loader.valid_observations(all_hba1c, as_of)
     latest = fhir_loader.latest_observation_date(hba1c)
     if latest is not None and as_of - latest <= HBA1C_WINDOW:
         return []
@@ -139,12 +150,16 @@ def _hba1c_gap(bundle, patient_id, as_of):
                 }
             )
     if latest is None:
-        detail = "No HbA1c result on record at all."
+        if all_hba1c:
+            detail = (
+                "No final, validly dated HbA1c result on or before "
+                f"{as_of.isoformat()}."
+            )
+        else:
+            detail = "No HbA1c result on record at all."
     else:
         detail = f"Last HbA1c was {latest.isoformat()}."
-        latest_obs = max(
-            hba1c, key=lambda o: fhir_loader.observation_date(o) or date.min
-        )
+        latest_obs = max(hba1c, key=fhir_loader.observation_date)
         evidence.append(
             {
                 "resourceType": "Observation",
@@ -165,44 +180,76 @@ def _hba1c_gap(bundle, patient_id, as_of):
     ]
 
 
-def _has_colorectal_screening(bundle):
-    """True if any colorectal screening is on record.
+def _is_within_lookback(event_date, as_of, years):
+    """Whether a known event date is in the inclusive calendar-year window."""
+    if event_date is None or event_date > as_of:
+        return False
+    try:
+        threshold = as_of.replace(year=as_of.year - years)
+    except ValueError:
+        threshold = as_of.replace(year=as_of.year - years, day=28)
+    return event_date >= threshold
 
-    Counts any of: a colonoscopy Procedure (SNOMED 73761001 / CPT 45378),
-    a stool FIT/FOBT Observation (LOINC 2335-8), or an Encounter coded for
-    colon-cancer screening (ICD-10 Z12.11). Real HEDIS lookback windows
-    (10 years for colonoscopy, 1 year for FIT) are deliberately simplified
-    here: any screening on record counts. See README.md.
-    """
+
+def _has_colorectal_screening(bundle, as_of):
+    """True when a dated, completed screening is within its type's window."""
     for proc in fhir_loader.resources_of_type(bundle, "Procedure"):
-        if fhir_loader.has_code(proc, "http://snomed.info/sct", SNOMED_COLONOSCOPY):
-            return True
-        if fhir_loader.has_code(
+        is_colonoscopy = fhir_loader.has_code(
+            proc, "http://snomed.info/sct", SNOMED_COLONOSCOPY
+        ) or fhir_loader.has_code(
             proc, "http://www.ama-assn.org/go/cpt", CPT_COLONOSCOPY
+        )
+        if (
+            is_colonoscopy
+            and proc.get("status") == "completed"
+            and _is_within_lookback(
+                fhir_loader.procedure_date(proc),
+                as_of,
+                COLONOSCOPY_LOOKBACK_YEARS,
+            )
         ):
             return True
-    if fhir_loader.observations_by_loinc(bundle, LOINC_FOBT):
+    fit_observations = fhir_loader.valid_observations(
+        fhir_loader.observations_by_loinc(bundle, LOINC_FOBT), as_of
+    )
+    if any(
+        _is_within_lookback(
+            fhir_loader.observation_date(observation), as_of, FIT_LOOKBACK_YEARS
+        )
+        for observation in fit_observations
+    ):
         return True
     for enc in fhir_loader.resources_of_type(bundle, "Encounter"):
-        for reason in enc.get("reasonCode", []):
-            if any(
-                c.get("system") == "http://hl7.org/fhir/sid/icd-10-cm"
-                and c.get("code") == ICD10_SCREENING_COLON
-                for c in reason.get("coding", [])
-            ):
-                return True
+        if (
+            enc.get("status") == "finished"
+            and fhir_loader.has_code(
+                enc,
+                "http://hl7.org/fhir/sid/icd-10-cm",
+                ICD10_SCREENING_COLON,
+                field="reasonCode",
+            )
+            and _is_within_lookback(
+                fhir_loader.encounter_date(enc),
+                as_of,
+                SCREENING_ENCOUNTER_LOOKBACK_YEARS,
+            )
+        ):
+            return True
     return False
 
 
 def _screening_gap(bundle, patient_id, as_of):
-    """Rule 3: age 45-75 AND no colorectal screening on record."""
+    """Rule 3: age 45-75 AND no valid, in-window colorectal screening."""
     patient = fhir_loader.get_patient(bundle)
     age = fhir_loader.patient_age(patient, as_of)
-    if not (SCREENING_AGE_MIN <= age <= SCREENING_AGE_MAX):
+    if age is None or not (SCREENING_AGE_MIN <= age <= SCREENING_AGE_MAX):
         return []
-    if _has_colorectal_screening(bundle):
+    if _has_colorectal_screening(bundle, as_of):
         return []
-    detail = f"Age {age} (screening range is 45-75) with no colorectal screening on record."
+    detail = (
+        f"Age {age} (screening range is 45-75) with no valid colorectal "
+        "screening in the applicable lookback window."
+    )
     return [
         {
             "id": f"GAP-{patient_id}-SCREENING",
@@ -217,11 +264,11 @@ def _screening_gap(bundle, patient_id, as_of):
     ]
 
 
-def _referral_gaps(bundle, patient_id):
+def _referral_gaps(bundle, patient_id, as_of):
     """Rule 4: active ServiceRequest with no follow-up visit/procedure."""
     gaps = []
     for referral in fhir_loader.active_referrals(bundle):
-        if fhir_loader.referral_is_resolved(bundle, referral):
+        if fhir_loader.referral_is_resolved(bundle, referral, as_of):
             continue
         code = referral.get("code", {})
         description = code.get("text") or "Referral"

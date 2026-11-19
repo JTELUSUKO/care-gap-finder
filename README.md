@@ -21,8 +21,8 @@ agent runs entirely on your Mac with Python + LangGraph + pytest.
 | Data Sources (EHR/EMR, Labs, Payers) | Synthetic FHIR R4 patient bundles | `data/patients/p001.json` … `p005.json` |
 | Interoperability & Integration Platform | Load + query the FHIR bundles (FHIR APIs, data mapping) | `care_gap/fhir_loader.py` |
 | AI Agent — Reason · Plan · Act | Deterministic gap rules (the reason core) | `care_gap/gap_rules.py` |
-| AI Agent — the graph | LangGraph flow: load → detect → explain → draft alert | `care_gap/agent.py` |
-| AI Agent — plain-language writing | Explanation adapter (mock by default) | `care_gap/llm.py` |
+| AI Agent — the graph | LangGraph: load → detect → parallel specialists → coordinate/verify → draft | `care_gap/agent.py` |
+| AI Agent — plain-language writing | Gap-specific specialist prompts (mock by default) | `care_gap/llm.py` |
 | Human in the Loop — Review · Approve · Intervene | Approval queue: pending → sent / rejected | `care_gap/alerts.py` |
 | Actions / Workflows — Alerts & Notifications | The draft alert (written, never sent by the agent) | `alerts/pending/` |
 | Audit, Logging & Traceability | One timestamped line per decision | `alerts/audit.log` |
@@ -36,8 +36,8 @@ care-gap-finder/
   care_gap/
     fhir_loader.py        read + query a FHIR bundle
     gap_rules.py          the four deterministic gap rules
-    llm.py                explanation adapter (mock / claude)
-    agent.py              the LangGraph graph
+    llm.py                specialist explanation prompts (mock / claude)
+    agent.py              parallel specialist agents and coordinator graph
     alerts.py             the human approval queue
   data/patients/          5 synthetic FHIR bundles + README
   alerts/                 pending/ sent/ rejected/ audit.log
@@ -122,34 +122,49 @@ no-op — the queue refuses to double-send.
 ## The grounding rule: rules find, the LLM explains
 
 The four gap rules in `gap_rules.py` are plain Python checks against the
-FHIR bundle. The language model never invents, adds, or removes a gap —
-it only turns a found gap into a plain-language sentence, using only the
-evidence the rules attached. That is the same discipline as the
-agent-evaluation harness: the deterministic layer is the source of truth,
-and the LLM is a writer, not a decider.
+FHIR bundle. They remain the source of truth: the agents cannot invent,
+add, or remove a gap.
+
+After detection, LangGraph runs four specialist explanation agents in
+parallel (blood pressure, HbA1c, colorectal screening, and referrals).
+Each receives only findings of its assigned type and their attached
+evidence. A coordinator restores the original gap order and requires
+exactly one specialist result per finding. A verifier checks that each
+result is non-empty and remains attached to the expected gap and evidence
+references before the alert is drafted. This is a structural grounding
+check, not an independent clinical validation of generated prose. The
+human approval step remains unchanged.
 
 The four rules:
 
-1. **Blood pressure** — no systolic BP Observation (LOINC 8480-6) in the
-   last 12 months. Severity: soon.
+1. **Blood pressure** — no final, amended, or corrected systolic BP
+   Observation (LOINC 8480-6) with a valid date in the last 12 months.
+   Future-dated and non-final results do not suppress a gap. Severity: soon.
 2. **HbA1c** — the patient has a diabetes Condition (ICD-10 E11.9 /
-   SNOMED 44054006) and no HbA1c Observation (LOINC 4548-4) in the last
-   6 months. Severity: soon.
-3. **Colorectal screening** — age 45–75 and no screening on record
-   (colonoscopy Procedure, FIT/FOBT Observation, or screening Encounter).
-   Severity: routine.
+   SNOMED 44054006) and no final, amended, or corrected HbA1c Observation
+   (LOINC 4548-4) with a valid date in the last 6 months. Severity: soon.
+3. **Colorectal screening** — age 45–75 and no completed colonoscopy in
+   the last 10 years, final FIT/FOBT Observation in the last year, or
+   finished screening-coded Encounter in the last year. Each record must
+   have a usable date no later than the reference date; unknown codes or
+   missing dates do not count as screening evidence. Since a Z12.11
+   Encounter does not identify a screening modality, it uses the shorter
+   one-year window. Severity: routine.
 4. **Open referral** — a ServiceRequest with status `active` and no
-   follow-up Encounter or Procedure pointing back at it. Severity:
-   routine.
+   matching, completed follow-up by the reference date: a `finished`
+   Encounter or `completed` Procedure with a `basedOn` reference to the
+   referral. Canceled, entered-in-error, planned, undated, and future events
+   do not resolve it. Severity: routine.
 
 The demo evaluates "overdue" against a fixed reference date, 2026-11-12
 (`gap_rules.DEFAULT_AS_OF`), so the answers are stable and the tests are
 deterministic. Evaluate against another date with `--as-of YYYY-MM-DD`.
 
-Two deliberate simplifications, both documented in the code: the
-screening rule counts any screening on record (real HEDIS uses lookback
-windows — 10 years for colonoscopy, 1 year for FIT), and the referral
-rule matches follow-ups only through FHIR `basedOn` references.
+The screening windows are a small, documented demo policy (10 years for
+colonoscopy and 1 year for FIT/FOBT or a Z12.11 Encounter), not a complete
+clinical guideline implementation. Unknown screening codes or dates do not
+suppress a gap. Referral matching remains intentionally limited to FHIR
+`basedOn` references.
 
 ## Switch to the real LLM (Claude Code)
 
@@ -179,6 +194,11 @@ Expect **all tests to pass**. What each one proves:
 - **Control patient has no gaps** — a healthy record stays silent.
 - **Completed referral does not fire** — P001's finished dermatology
   referral must not count as open.
+- **Clinical data validity** — non-final, missing-date, malformed-date,
+  and future observations/events cannot suppress a gap; screening lookback
+  boundaries and unknown patient age are covered.
+- **Specialist coordination** — each detected gap is handled by its matching
+  explanation specialist, and results are checked before alert drafting.
 - **Evidence references real resources** — every gap's evidence points
   at a resource id that exists in that patient's bundle.
 - **No gaps means no alert** — the control patient writes no alert file.

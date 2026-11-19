@@ -15,7 +15,15 @@ Two modes, chosen by the CARE_GAP_LLM environment variable:
 """
 from __future__ import annotations
 
+import json
 import subprocess
+
+SPECIALIST_ROLES = {
+    "blood_pressure": "blood-pressure care-gap specialist",
+    "hba1c": "diabetes and HbA1c care-gap specialist",
+    "colorectal_screening": "colorectal screening care-gap specialist",
+    "open_referral": "referral follow-up care-gap specialist",
+}
 
 MOCK_TEMPLATES = {
     "blood_pressure": (
@@ -42,7 +50,8 @@ MOCK_TEMPLATES = {
 def explain_gap(gap, patient_name, mode="mock"):
     """Return a plain-language explanation for one gap dict."""
     if mode == "claude":
-        return _explain_with_claude(gap, patient_name)
+        role = SPECIALIST_ROLES.get(gap["type"], "care-gap explanation specialist")
+        return _explain_with_claude(gap, patient_name, role)
     if mode == "mock":
         template = MOCK_TEMPLATES.get(
             gap["type"],
@@ -52,21 +61,25 @@ def explain_gap(gap, patient_name, mode="mock"):
     raise ValueError(f'Unknown LLM mode "{mode}" — use "mock" or "claude".')
 
 
-def _explain_with_claude(gap, patient_name):
-    """Draft the explanation with the Claude Code CLI.
+def _explain_with_claude(gap, patient_name, role):
+    """Draft a specialist explanation with the Claude Code CLI.
 
     The prompt hands the model ONLY the gap the rules found, with its
     evidence, and instructs it to explain that gap and nothing else.
     """
+    finding = {
+        key: gap[key]
+        for key in ("type", "title", "severity", "detail", "evidence")
+    }
     prompt = (
-        "You are drafting a short note for a care coordinator about one "
-        "care gap found by a rules engine. Explain the gap in plain "
-        "language in two or three sentences. Use ONLY the facts below. "
-        "Do not invent, add, or suggest any other gap, condition, or test.\n\n"
+        f"You are a {role}. Draft a short note for a care coordinator "
+        "about one care gap found by a deterministic rules engine. Explain "
+        "the gap in plain language in two or three sentences. Use ONLY the "
+        "provided facts and evidence. Do not infer a diagnosis or invent, "
+        "add, or suggest any other gap, condition, or test.\n\n"
         f"Patient: {patient_name} (fictional synthetic record)\n"
-        f"Gap: {gap['title']}\n"
-        f"Severity: {gap['severity']}\n"
-        f"Facts: {gap['detail']}\n\n"
+        "Rule finding and evidence:\n"
+        f"{json.dumps(finding, ensure_ascii=False, indent=2)}\n\n"
         "Reply with the note only — no headings, no bullet points."
     )
     try:

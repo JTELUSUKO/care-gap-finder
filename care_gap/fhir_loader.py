@@ -15,6 +15,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+VALID_OBSERVATION_STATUSES = frozenset({"final", "amended", "corrected"})
+
 
 def load_bundle(path):
     """Load a patient bundle JSON file and validate its basic shape.
@@ -77,10 +79,13 @@ def patient_mrn(patient):
 
 
 def patient_age(patient, as_of):
-    """Age in whole years on the reference date `as_of` (a date object)."""
-    birth = _parse_date(patient.get("birthDate"))
-    if birth is None:
-        raise ValueError("Patient has no usable birthDate.")
+    """Age in whole years, or None when a complete usable birth date is absent."""
+    birth_value = patient.get("birthDate") if patient else None
+    if not isinstance(birth_value, str) or len(birth_value) != 10:
+        return None
+    birth = _parse_date(birth_value)
+    if birth is None or birth > as_of:
+        return None
     years = as_of.year - birth.year
     if (as_of.month, as_of.day) < (birth.month, birth.day):
         years -= 1
@@ -148,15 +153,27 @@ def active_referrals(bundle):
     ]
 
 
-def referral_is_resolved(bundle, service_request):
-    """True if an Encounter or Procedure references this referral.
+def referral_is_resolved(bundle, service_request, as_of):
+    """True if a completed, dated, non-future event references this referral.
 
     In FHIR, the follow-up visit or procedure points back at the request
-    through `basedOn`. A referral with no such follow-up is still open.
+    through `basedOn`. Only finished Encounters and completed Procedures
+    on or before `as_of` resolve it.
     """
     ref = f"ServiceRequest/{service_request.get('id')}"
     for resource in resources(bundle):
-        if resource.get("resourceType") not in ("Encounter", "Procedure"):
+        resource_type = resource.get("resourceType")
+        if resource_type == "Encounter":
+            if resource.get("status") != "finished":
+                continue
+            event_date = encounter_date(resource)
+        elif resource_type == "Procedure":
+            if resource.get("status") != "completed":
+                continue
+            event_date = procedure_date(resource)
+        else:
+            continue
+        if event_date is None or event_date > as_of:
             continue
         for based_on in resource.get("basedOn", []):
             if based_on.get("reference") == ref:
@@ -185,9 +202,39 @@ def _parse_date(value):
         return None
 
 
+def encounter_date(encounter):
+    """The Encounter's end date, or start date when no end is recorded."""
+    period = encounter.get("period") or {}
+    return _parse_date(period.get("end")) or _parse_date(period.get("start"))
+
+
+def procedure_date(procedure):
+    """The Procedure's performed date, or None when it is not recorded."""
+    performed = procedure.get("performedDateTime")
+    if performed is not None:
+        return _parse_date(performed)
+    period = procedure.get("performedPeriod") or {}
+    return _parse_date(period.get("end")) or _parse_date(period.get("start"))
+
+
 def observation_date(observation):
     """The effective date of an Observation, or None."""
-    return _parse_date(observation.get("effectiveDateTime"))
+    effective = observation.get("effectiveDateTime")
+    if effective is not None:
+        return _parse_date(effective)
+    period = observation.get("effectivePeriod") or {}
+    return _parse_date(period.get("end")) or _parse_date(period.get("start"))
+
+
+def valid_observations(observations, as_of):
+    """Finalized observations with a valid effective date no later than as_of."""
+    return [
+        observation
+        for observation in observations
+        if observation.get("status") in VALID_OBSERVATION_STATUSES
+        and (effective_date := observation_date(observation)) is not None
+        and effective_date <= as_of
+    ]
 
 
 def latest_observation_date(observations):

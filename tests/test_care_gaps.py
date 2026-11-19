@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import sys
+from copy import deepcopy
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -33,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from care_gap import alerts, fhir_loader, gap_rules  # noqa: E402
+from care_gap import agent, alerts, fhir_loader, gap_rules, llm  # noqa: E402
 from care_gap.agent import run_agent  # noqa: E402
 
 PATIENTS_DIR = ROOT / "data" / "patients"
@@ -68,6 +70,60 @@ def _load(filename):
     return fhir_loader.load_bundle(PATIENTS_DIR / filename)
 
 
+def _gap_types(bundle, as_of=gap_rules.DEFAULT_AS_OF):
+    return [gap["type"] for gap in gap_rules.detect_gaps(bundle, as_of=as_of)]
+
+
+def _add_resource(bundle, resource):
+    bundle["entry"].append({"resource": resource})
+
+
+def _colonoscopy(date_value, status="completed", code="73761001"):
+    procedure = {
+        "resourceType": "Procedure",
+        "id": "test-colonoscopy",
+        "status": status,
+        "code": {
+            "coding": [
+                {"system": "http://snomed.info/sct", "code": code}
+            ]
+        },
+    }
+    if date_value is not None:
+        procedure["performedDateTime"] = date_value
+    return procedure
+
+
+def _fit_observation(date_value, status="final"):
+    observation = {
+        "resourceType": "Observation",
+        "id": "test-fit",
+        "status": status,
+        "code": {
+            "coding": [{"system": "http://loinc.org", "code": "2335-8"}]
+        },
+    }
+    if date_value is not None:
+        observation["effectiveDateTime"] = date_value
+    return observation
+
+
+def _referral_followup(resource_type, status, event_date):
+    followup = {
+        "resourceType": resource_type,
+        "id": "test-referral-followup",
+        "status": status,
+        "basedOn": [{"reference": "ServiceRequest/ref-p003-cardio"}],
+    }
+    if resource_type == "Encounter":
+        followup["period"] = {}
+        if event_date is not None:
+            followup["period"]["start"] = event_date
+    elif event_date is not None:
+        followup["performedDateTime"] = event_date
+    return followup
+
+
 @pytest.mark.parametrize("filename", sorted(EXPECTED_GAPS))
 def test_each_patient_has_exactly_its_designed_gaps(filename):
     """Grounding: the rules find the designed gap — and nothing else."""
@@ -85,6 +141,130 @@ def test_control_patient_has_no_gaps():
     assert gap_rules.detect_gaps(bundle) == []
 
 
+@pytest.mark.parametrize(
+    ("filename", "gap_type"),
+    [
+        ("p001.json", "blood_pressure"),
+        ("p002.json", "hba1c"),
+        ("p003.json", "open_referral"),
+        ("p004.json", "colorectal_screening"),
+    ],
+)
+def test_each_gap_is_explained_by_its_specialist(tmp_path, filename, gap_type):
+    result = run_agent(PATIENTS_DIR / filename, alerts_dir=tmp_path)
+
+    assert len(result["gaps"]) == 1
+    assert result["gaps"][0]["type"] == gap_type
+    assert result["gaps"][0]["explanation_agent"] == f"{gap_type}_agent"
+
+
+def test_parallel_specialists_coordinate_all_findings(monkeypatch, tmp_path):
+    gap_types = [
+        "blood_pressure",
+        "hba1c",
+        "colorectal_screening",
+        "open_referral",
+    ]
+    gaps = [
+        {
+            "id": f"test-gap-{gap_type}",
+            "type": gap_type,
+            "title": f"Test {gap_type}",
+            "severity": "routine",
+            "detail": f"Test detail for {gap_type}.",
+            "evidence": [
+                {
+                    "resourceType": "Patient",
+                    "id": "patient-p005",
+                    "detail": "Synthetic test evidence.",
+                }
+            ],
+        }
+        for gap_type in gap_types
+    ]
+    monkeypatch.setattr(agent.gap_rules, "detect_gaps", lambda bundle, as_of: gaps)
+    monkeypatch.setattr(
+        agent,
+        "explain_gap",
+        lambda gap, patient_name, mode: f"{gap['type']} explanation",
+    )
+
+    result = run_agent(PATIENTS_DIR / "p005.json", alerts_dir=tmp_path)
+
+    assert [gap["type"] for gap in result["gaps"]] == gap_types
+    assert [gap["explanation_agent"] for gap in result["gaps"]] == [
+        f"{gap_type}_agent" for gap_type in gap_types
+    ]
+    assert len(result["agent_outputs"]) == len(gap_types)
+
+
+def test_coordinator_rejects_output_for_an_unknown_gap():
+    gap = gap_rules.detect_gaps(_load("p001.json"))[0]
+
+    with pytest.raises(ValueError, match="unknown gap ID"):
+        agent._node_coordinate_explanations(
+            {"gaps": [gap], "agent_outputs": [{"gap_id": "not-a-real-gap"}]}
+        )
+
+
+def test_verifier_rejects_specialist_evidence_mismatch():
+    gap = gap_rules.detect_gaps(_load("p001.json"))[0]
+    coordinated = {
+        "gap_id": gap["id"],
+        "gap_type": gap["type"],
+        "agent": "blood_pressure_agent",
+        "evidence_refs": ["Observation/not-in-the-gap"],
+        "explanation": "A test explanation.",
+    }
+
+    with pytest.raises(ValueError, match="evidence mismatch"):
+        agent._node_verify_explanations(
+            {"gaps": [gap], "coordinated_explanations": [coordinated]}
+        )
+
+
+@pytest.mark.parametrize(
+    ("gap_type", "role"),
+    [
+        ("blood_pressure", "blood-pressure care-gap specialist"),
+        ("hba1c", "diabetes and HbA1c care-gap specialist"),
+        ("colorectal_screening", "colorectal screening care-gap specialist"),
+        ("open_referral", "referral follow-up care-gap specialist"),
+    ],
+)
+def test_llm_prompt_uses_gap_specialist_and_only_attached_evidence(
+    monkeypatch, gap_type, role
+):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return llm.subprocess.CompletedProcess(command, 0, stdout="A grounded note.")
+
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    gap = {
+        "type": gap_type,
+        "title": f"Test {gap_type}",
+        "severity": "routine",
+        "detail": "A test rule finding.",
+        "evidence": [
+            {
+                "resourceType": "Patient",
+                "id": "patient-test",
+                "detail": "The attached evidence.",
+            }
+        ],
+    }
+
+    assert llm.explain_gap(gap, "Synthetic Patient", mode="claude") == (
+        "A grounded note."
+    )
+    prompt = captured["command"][2]
+    assert role in prompt
+    assert "patient-test" in prompt
+    assert "Do not infer a diagnosis" in prompt
+
+
 def test_p001_completed_referral_does_not_fire():
     """P001's dermatology referral is completed — only the BP gap fires."""
     bundle = _load("p001.json")
@@ -92,6 +272,268 @@ def test_p001_completed_referral_does_not_fire():
     assert len(gaps) == 1
     assert gaps[0]["type"] == "blood_pressure"
     assert gaps[0]["severity"] == "soon"
+
+
+@pytest.mark.parametrize(
+    ("screening_date", "expected_gap"),
+    [
+        ("2016-11-12", False),
+        ("2016-11-11", True),
+    ],
+)
+def test_colonoscopy_uses_inclusive_ten_year_lookback(screening_date, expected_gap):
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _colonoscopy(screening_date))
+
+    assert ("colorectal_screening" in _gap_types(bundle)) is expected_gap
+
+
+@pytest.mark.parametrize(
+    ("screening_date", "expected_gap"),
+    [
+        ("2025-11-12", False),
+        ("2025-11-11", True),
+    ],
+)
+def test_fit_uses_inclusive_one_year_lookback(screening_date, expected_gap):
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _fit_observation(screening_date))
+
+    assert ("colorectal_screening" in _gap_types(bundle)) is expected_gap
+
+
+@pytest.mark.parametrize("screening_date", [None, "not-a-date", "2026-11-13"])
+def test_colonoscopy_without_valid_nonfuture_date_does_not_suppress_gap(
+    screening_date,
+):
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _colonoscopy(screening_date))
+
+    assert "colorectal_screening" in _gap_types(bundle)
+
+
+def test_unknown_or_incomplete_screening_does_not_suppress_gap():
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _colonoscopy("2026-10-01", code="unknown-code"))
+    _add_resource(bundle, _colonoscopy("2026-10-01", status="cancelled"))
+    _add_resource(bundle, _fit_observation(None))
+
+    assert "colorectal_screening" in _gap_types(bundle)
+
+
+@pytest.mark.parametrize(
+    ("status", "screening_date"),
+    [
+        ("preliminary", "2026-11-01"),
+        ("entered-in-error", "2026-11-01"),
+        ("final", "not-a-date"),
+        ("final", "2026-11-13"),
+    ],
+)
+def test_fit_requires_final_result_with_valid_nonfuture_date(status, screening_date):
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _fit_observation(screening_date, status=status))
+
+    assert "colorectal_screening" in _gap_types(bundle)
+
+
+@pytest.mark.parametrize(
+    ("status", "screening_date", "expected_gap"),
+    [
+        ("finished", "2025-11-12", False),
+        ("finished", "2025-11-11", True),
+        ("planned", "2026-11-01", True),
+        ("finished", "2026-11-13", True),
+    ],
+)
+def test_screening_encounter_requires_finished_recent_date(
+    status, screening_date, expected_gap
+):
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(
+        bundle,
+        {
+            "resourceType": "Encounter",
+            "id": "test-screening-encounter",
+            "status": status,
+            "period": {"start": screening_date},
+            "reasonCode": [
+                {
+                    "coding": [
+                        {
+                            "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                            "code": "Z12.11",
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+
+    assert ("colorectal_screening" in _gap_types(bundle)) is expected_gap
+
+
+def test_valid_recent_screening_suppresses_gap_even_with_old_screening():
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _colonoscopy("2000-01-01"))
+    _add_resource(bundle, _fit_observation("2026-01-12"))
+
+    assert "colorectal_screening" not in _gap_types(bundle)
+
+
+@pytest.mark.parametrize(
+    ("resource_type", "status", "event_date", "expected_gap"),
+    [
+        ("Encounter", "finished", "2026-11-12", False),
+        ("Encounter", "cancelled", "2026-11-12", True),
+        ("Encounter", "entered-in-error", "2026-11-12", True),
+        ("Encounter", "planned", "2026-11-12", True),
+        ("Encounter", "finished", "2026-11-13", True),
+        ("Encounter", "finished", None, True),
+        ("Procedure", "completed", "2026-11-12", False),
+        ("Procedure", "cancelled", "2026-11-12", True),
+        ("Procedure", "entered-in-error", "2026-11-12", True),
+        ("Procedure", "completed", "2026-11-13", True),
+        ("Procedure", "completed", None, True),
+    ],
+)
+def test_referral_requires_completed_dated_nonfuture_followup(
+    resource_type, status, event_date, expected_gap
+):
+    bundle = deepcopy(_load("p003.json"))
+    _add_resource(
+        bundle, _referral_followup(resource_type, status, event_date)
+    )
+
+    assert ("open_referral" in _gap_types(bundle)) is expected_gap
+
+
+@pytest.mark.parametrize(
+    ("status", "effective_date"),
+    [
+        ("cancelled", "2026-11-01"),
+        ("entered-in-error", "2026-11-01"),
+        ("preliminary", "2026-11-01"),
+        ("final", None),
+        ("final", "not-a-date"),
+        ("final", "2026-11-13"),
+    ],
+)
+def test_invalid_bp_observation_does_not_suppress_gap(status, effective_date):
+    bundle = deepcopy(_load("p001.json"))
+    observation = {
+        "resourceType": "Observation",
+        "id": "test-bp",
+        "status": status,
+        "code": {
+            "coding": [{"system": "http://loinc.org", "code": "8480-6"}]
+        },
+    }
+    if effective_date is not None:
+        observation["effectiveDateTime"] = effective_date
+    _add_resource(bundle, observation)
+
+    assert "blood_pressure" in _gap_types(bundle)
+
+
+@pytest.mark.parametrize("status", ["final", "amended", "corrected"])
+def test_finalized_recent_bp_observation_suppresses_gap(status):
+    bundle = deepcopy(_load("p001.json"))
+    _add_resource(
+        bundle,
+        {
+            "resourceType": "Observation",
+            "id": "test-bp",
+            "status": status,
+            "effectiveDateTime": "2026-11-01",
+            "code": {
+                "coding": [{"system": "http://loinc.org", "code": "8480-6"}]
+            },
+        },
+    )
+
+    assert "blood_pressure" not in _gap_types(bundle)
+
+
+def test_hba1c_uses_valid_results_and_ignores_newer_invalid_observation():
+    bundle = deepcopy(_load("p002.json"))
+    invalid = {
+        "resourceType": "Observation",
+        "id": "test-invalid-hba1c",
+        "status": "entered-in-error",
+        "effectiveDateTime": "2026-11-01",
+        "code": {
+            "coding": [{"system": "http://loinc.org", "code": "4548-4"}]
+        },
+    }
+    _add_resource(bundle, invalid)
+
+    gaps = gap_rules.detect_gaps(bundle)
+    hba1c_gap = next(gap for gap in gaps if gap["type"] == "hba1c")
+    assert "2026-03-02" in hba1c_gap["detail"]
+    assert all(ev["id"] != "test-invalid-hba1c" for ev in hba1c_gap["evidence"])
+
+
+@pytest.mark.parametrize(
+    ("status", "effective_date"),
+    [
+        ("preliminary", "2026-11-01"),
+        ("cancelled", "2026-11-01"),
+        ("final", None),
+        ("final", "not-a-date"),
+        ("final", "2026-11-13"),
+    ],
+)
+def test_invalid_hba1c_observation_does_not_suppress_gap(status, effective_date):
+    bundle = deepcopy(_load("p002.json"))
+    observation = {
+        "resourceType": "Observation",
+        "id": "test-invalid-hba1c",
+        "status": status,
+        "code": {
+            "coding": [{"system": "http://loinc.org", "code": "4548-4"}]
+        },
+    }
+    if effective_date is not None:
+        observation["effectiveDateTime"] = effective_date
+    _add_resource(bundle, observation)
+
+    assert "hba1c" in _gap_types(bundle)
+
+
+@pytest.mark.parametrize("status", ["final", "amended", "corrected"])
+def test_finalized_recent_hba1c_suppresses_gap(status):
+    bundle = deepcopy(_load("p002.json"))
+    _add_resource(
+        bundle,
+        {
+            "resourceType": "Observation",
+            "id": "test-hba1c",
+            "status": status,
+            "effectiveDateTime": "2026-11-01",
+            "code": {
+                "coding": [{"system": "http://loinc.org", "code": "4548-4"}]
+            },
+        },
+    )
+
+    assert "hba1c" not in _gap_types(bundle)
+
+
+@pytest.mark.parametrize(
+    "birth_date",
+    [None, "not-a-date", "1974", "1974-09"],
+)
+def test_unknown_or_partial_birth_date_preserves_other_gaps(birth_date):
+    bundle = deepcopy(_load("p001.json"))
+    patient = fhir_loader.get_patient(bundle)
+    if birth_date is None:
+        patient.pop("birthDate", None)
+    else:
+        patient["birthDate"] = birth_date
+
+    assert fhir_loader.patient_age(patient, gap_rules.DEFAULT_AS_OF) is None
+    assert _gap_types(bundle) == ["blood_pressure"]
 
 
 @pytest.mark.parametrize("filename", sorted(EXPECTED_GAPS))
