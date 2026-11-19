@@ -12,8 +12,15 @@ RxNorm, CPT) so the patterns transfer to real FHIR data.
 from __future__ import annotations
 
 import json
-from datetime import date
+import re
+from datetime import date, datetime
 from pathlib import Path
+
+_FHIR_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_FHIR_DATETIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
+)
 
 VALID_OBSERVATION_STATUSES = frozenset({"final", "amended", "corrected"})
 
@@ -193,13 +200,18 @@ def latest_encounter(bundle):
 
 
 def _parse_date(value):
-    """Parse 'YYYY-MM-DD' (or a datetime string) into a date, or None."""
+    """Parse a complete FHIR date/dateTime value into a date, or None."""
     if not value or not isinstance(value, str):
         return None
     try:
-        return date.fromisoformat(value[:10])
+        if _FHIR_DATE.fullmatch(value):
+            return date.fromisoformat(value)
+        if _FHIR_DATETIME.fullmatch(value):
+            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            return datetime.fromisoformat(normalized).date()
     except ValueError:
-        return None
+        pass
+    return None
 
 
 def encounter_date(encounter):

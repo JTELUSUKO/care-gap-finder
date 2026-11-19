@@ -312,6 +312,13 @@ def test_colonoscopy_without_valid_nonfuture_date_does_not_suppress_gap(
     assert "colorectal_screening" in _gap_types(bundle)
 
 
+def test_colonoscopy_with_malformed_datetime_suffix_does_not_suppress_gap():
+    bundle = deepcopy(_load("p004.json"))
+    _add_resource(bundle, _colonoscopy("2026-10-01garbage"))
+
+    assert "colorectal_screening" in _gap_types(bundle)
+
+
 def test_unknown_or_incomplete_screening_does_not_suppress_gap():
     bundle = deepcopy(_load("p004.json"))
     _add_resource(bundle, _colonoscopy("2026-10-01", code="unknown-code"))
@@ -327,6 +334,7 @@ def test_unknown_or_incomplete_screening_does_not_suppress_gap():
         ("preliminary", "2026-11-01"),
         ("entered-in-error", "2026-11-01"),
         ("final", "not-a-date"),
+        ("final", "2026-11-01garbage"),
         ("final", "2026-11-13"),
     ],
 )
@@ -344,6 +352,7 @@ def test_fit_requires_final_result_with_valid_nonfuture_date(status, screening_d
         ("finished", "2025-11-11", True),
         ("planned", "2026-11-01", True),
         ("finished", "2026-11-13", True),
+        ("finished", "2026-11-01garbage", True),
     ],
 )
 def test_screening_encounter_requires_finished_recent_date(
@@ -389,11 +398,13 @@ def test_valid_recent_screening_suppresses_gap_even_with_old_screening():
         ("Encounter", "entered-in-error", "2026-11-12", True),
         ("Encounter", "planned", "2026-11-12", True),
         ("Encounter", "finished", "2026-11-13", True),
+        ("Encounter", "finished", "2026-11-01garbage", True),
         ("Encounter", "finished", None, True),
         ("Procedure", "completed", "2026-11-12", False),
         ("Procedure", "cancelled", "2026-11-12", True),
         ("Procedure", "entered-in-error", "2026-11-12", True),
         ("Procedure", "completed", "2026-11-13", True),
+        ("Procedure", "completed", "2026-11-01garbage", True),
         ("Procedure", "completed", None, True),
     ],
 )
@@ -416,6 +427,7 @@ def test_referral_requires_completed_dated_nonfuture_followup(
         ("preliminary", "2026-11-01"),
         ("final", None),
         ("final", "not-a-date"),
+        ("final", "2026-11-01garbage"),
         ("final", "2026-11-13"),
     ],
 )
@@ -481,6 +493,7 @@ def test_hba1c_uses_valid_results_and_ignores_newer_invalid_observation():
         ("cancelled", "2026-11-01"),
         ("final", None),
         ("final", "not-a-date"),
+        ("final", "2026-11-01garbage"),
         ("final", "2026-11-13"),
     ],
 )
@@ -518,6 +531,22 @@ def test_finalized_recent_hba1c_suppresses_gap(status):
     )
 
     assert "hba1c" not in _gap_types(bundle)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-11-01", date(2026, 11, 1)),
+        ("2026-11-01T10:30:45Z", date(2026, 11, 1)),
+        ("2026-11-01T10:30:45.123-05:00", date(2026, 11, 1)),
+        ("2026-11-01garbage", None),
+        ("2026-11-01T25:30:45Z", None),
+        ("2026-02-30", None),
+        ("2026-11", None),
+    ],
+)
+def test_date_parser_requires_a_complete_valid_fhir_date(value, expected):
+    assert fhir_loader._parse_date(value) == expected
 
 
 @pytest.mark.parametrize(
