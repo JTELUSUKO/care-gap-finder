@@ -9,6 +9,7 @@ alerts/pending/
 alerts/sent/
 alerts/rejected/
 alerts/audit.log
+alerts/.lock
 
 # macOS
 .DS_Store

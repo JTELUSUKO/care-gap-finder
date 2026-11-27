@@ -119,6 +119,41 @@ def test_no_gaps_means_no_alert(tmp_path):
     assert list((alerts_dir / "pending").glob("*.json")) == []
 
 
+
+def _count_explanations(monkeypatch):
+    from care_gap import agent
+
+    calls = []
+    monkeypatch.setattr(
+        agent, "explain_gap", lambda gap, *a, **k: calls.append(gap["id"]) or "note"
+    )
+    return calls
+
+
+def _steps_run(patient, alerts_dir):
+    """The names of the graph steps that ran, in order."""
+    from care_gap import agent
+
+    state = {"patient_path": str(PATIENTS_DIR / patient), "as_of": "2026-11-12",
+             "llm_mode": "mock", "alerts_dir": str(alerts_dir)}
+    return [step for update in agent.build_graph().stream(state) for step in update]
+
+
+def test_no_gaps_skips_the_explain_step(tmp_path):
+    """The conditional edge sends a patient with no gaps past explain_gaps,
+    so no explanation (and no Claude call) is ever attempted for them."""
+    assert _steps_run("p005.json", tmp_path / "alerts") == [
+        "load_patient", "detect_gaps", "draft_alert"]
+    assert _steps_run("p002.json", tmp_path / "alerts") == [
+        "load_patient", "detect_gaps", "explain_gaps", "draft_alert"]
+
+
+def test_patients_with_gaps_still_get_explanations(tmp_path, monkeypatch):
+    calls = _count_explanations(monkeypatch)
+    result = run_agent(PATIENTS_DIR / "p002.json", alerts_dir=tmp_path / "alerts")
+    assert calls and calls == [g["id"] for g in result["gaps"]]
+    assert all(g["explanation"] == "note" for g in result["alert"]["gaps"])
+
 def test_hitl_gate_approve_and_reject(tmp_path):
     """An alert starts pending; approve -> sent, reject -> rejected.
 

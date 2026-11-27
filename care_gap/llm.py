@@ -71,7 +71,15 @@ def _explain_with_claude(gap, patient_name):
     )
     try:
         completed = subprocess.run(
-            ["claude", "-p", prompt],
+            # The model must only read the prompt and write text, so record
+            # text can't steer it into doing anything else. This takes all
+            # three flags:
+            #   --tools ""           no built-in tools (files, commands, web)
+            #   --strict-mcp-config  no MCP servers (mail, Drive, trading...)
+            #   --safe-mode          no CLAUDE.md, hooks, skills or plugins
+            # Do not use --bare instead: it ignores the normal sign-in.
+            ["claude", "-p", prompt, "--tools", "", "--strict-mcp-config",
+             "--safe-mode"],
             capture_output=True,
             text=True,
             timeout=120,
