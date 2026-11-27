@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Care-Gap Finder</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+         margin: 0; background: #f4f6f8; color: #1c2733; line-height: 1.5; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 80px; }
+  header { border-bottom: 2px solid #16324f; padding-bottom: 12px; margin-bottom: 20px; }
+  header h1 { margin: 0; font-size: 26px; color: #16324f; }
+  header p { margin: 4px 0 0; color: #555; font-size: 14px; }
+  .card { background: #fff; border: 1px solid #dde3e8; border-radius: 8px;
+          padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 17px; color: #16324f; }
+  .patients { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .patient-btn { border: 1px solid #b9c4cd; background: #fff; border-radius: 6px;
+                 padding: 8px 12px; font-size: 14px; cursor: pointer; }
+  .patient-btn:hover { border-color: #16324f; }
+  .patient-btn.selected { background: #16324f; color: #fff; border-color: #16324f; }
+  .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+  .controls label { font-size: 14px; }
+  .run-btn { background: #16324f; color: #fff; border: none; border-radius: 6px;
+             padding: 10px 20px; font-size: 15px; cursor: pointer; }
+  .run-btn:disabled { background: #8fa0ad; cursor: default; }
+  #status { min-height: 20px; font-size: 14px; margin-top: 10px; }
+  #status.error { color: #b3261e; }
+  #status.ok { color: #1a7f37; }
+  .gap { border-left: 4px solid #b9c4cd; padding: 10px 12px; margin: 12px 0;
+         background: #f8fafc; border-radius: 0 6px 6px 0; }
+  .gap .badge { display: inline-block; font-size: 11px; font-weight: 700;
+                letter-spacing: .04em; padding: 2px 8px; border-radius: 10px;
+                margin-right: 8px; vertical-align: middle; }
+  .badge.soon { background: #fef3c7; color: #92400e; }
+  .badge.routine { background: #e0e7ff; color: #3730a3; }
+  .gap h3 { display: inline; font-size: 15px; margin: 0; }
+  .gap p { margin: 6px 0 0; font-size: 14px; }
+  .gap .detail { color: #555; font-size: 13px; }
+  .gap .evidence { color: #666; font-size: 12.5px; margin-top: 6px; }
+  .alert-card { background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px;
+                padding: 14px 16px; margin-top: 14px; }
+  .alert-card h3 { margin: 0 0 6px; font-size: 15px; }
+  .alert-card code { font-size: 12.5px; word-break: break-all; }
+  .btn { border: 1px solid #b9c4cd; background: #fff; border-radius: 6px;
+         padding: 7px 14px; font-size: 14px; cursor: pointer; margin-right: 8px; }
+  .btn.approve { background: #1a7f37; color: #fff; border-color: #1a7f37; }
+  .btn.reject { background: #b3261e; color: #fff; border-color: #b3261e; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .pending-item { border: 1px solid #dde3e8; border-radius: 6px; padding: 12px 14px;
+                  margin: 10px 0; background: #fff; }
+  .pending-item h3 { margin: 0 0 4px; font-size: 14.5px; }
+  .pending-item p { margin: 2px 0; font-size: 13.5px; color: #444; }
+  .pending-item code { font-size: 12px; word-break: break-all; }
+  .muted { color: #666; font-size: 14px; }
+  .note { color: #92400e; font-size: 13.5px; }
+  #decision-status { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px;
+                     text-align: center; font-size: 14px; color: #fff; background: #16324f; }
+  #decision-status:empty { display: none; }
+  #decision-status.error { background: #b3261e; }
+  #decision-status.ok { background: #1a7f37; }
+  footer { margin-top: 24px; font-size: 13px; color: #666; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Care-Gap Finder</h1>
+    <p>Synthetic patients only — no real patient data. Rules find the gaps; the LLM only explains them.</p>
+  </header>
+
+  <div class="card">
+    <h2>1. Pick a patient</h2>
+    <div class="patients" id="patient-list"><span class="muted">Loading patients…</span></div>
+    <div class="controls">
+      <span>
+        <label><input type="radio" name="llm" value="mock" checked> Mock explanations</label>&nbsp;&nbsp;
+        <label><input type="radio" name="llm" value="claude"> Claude explanations</label>
+      </span>
+      <button class="run-btn" id="run-btn" onclick="runAgent()">Run agent</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="results-card" style="display:none">
+    <h2 id="results-title">Results</h2>
+    <div id="results"></div>
+  </div>
+
+  <div class="card">
+    <h2>Pending alerts — waiting for a human decision</h2>
+    <div id="pending-list"><span class="muted">Loading…</span></div>
+  </div>
+
+  <footer>
+    The agent drafts alerts; a human approves or rejects them. Every decision is written to <code>alerts/audit.log</code>.
+  </footer>
+</div>
+<!-- Fixed to the bottom of the window, so outcomes show wherever you scroll. -->
+<div id="decision-status" role="status" aria-live="polite"></div>
+
+<script>
+let selectedPatient = null;
+let draft = null;            // the results card: { alert, state }
+let pending = [];            // the pending list, as last loaded
+let unreadable = [];         // pending files the server could not read
+let pendingRequest = 0;      // so a slow, older response never wins
+const inFlight = new Set();  // alert ids with a decision being sent
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+                  .replace(/'/g, "&#39;");
+}
+
+// Every POST carries this header; the server refuses POSTs without it,
+// so other websites can't make your browser trigger runs or decisions.
+const UI_HEADERS = { "X-Requested-With": "care-gap-finder" };
+
+// Approve/Reject buttons carry the alert id in data attributes (no inline
+// onclick code), and one listener handles them all.
+function decisionButtons(alertId) {
+  const id = esc(alertId);
+  const off = inFlight.has(alertId) ? " disabled" : "";
+  return '<button class="btn approve" data-action="approve" data-alert-id="' + id + '"' + off + '>Approve</button>' +
+         '<button class="btn reject" data-action="reject" data-alert-id="' + id + '"' + off + '>Reject</button>';
+}
+
+function previouslySentHtml(alert) {
+  if (!alert.previously_sent) return "";
+  return '<p class="note">An alert for the same gap(s) was already approved (' +
+    esc(alert.previously_sent) + '). Approving again contacts the care team twice.</p>';
+}
+
+const DRAFT_HEADINGS = {
+  pending: "Draft alert — not sent",
+  approve: "Alert approved — sent",
+  reject: "Alert rejected — not sent",
+  gone: "No longer pending — already decided elsewhere",
+};
+
+function renderDraft() {
+  const el = document.getElementById("draft-alert");
+  if (!el || !draft) return;
+  const open = draft.state === "pending";
+  el.innerHTML = '<h3>' + DRAFT_HEADINGS[draft.state] + '</h3>' +
+    '<p><code>' + esc(draft.alert.alert_id) + '</code><br>Created: ' + esc(draft.alert.created_at) + '</p>' +
+    (open ? previouslySentHtml(draft.alert) + decisionButtons(draft.alert.alert_id) : "");
+}
+
+function renderPending() {
+  let html = "";
+  unreadable.forEach(name => {
+    html += '<p class="note">Could not read alerts/pending/' + esc(name) + ' — skipped.</p>';
+  });
+  if (!pending.length) html += '<p class="muted">No pending alerts. Run the agent first.</p>';
+  pending.forEach(a => {
+    html += '<div class="pending-item"><h3>' + esc(a.patient_name) + ' (' + esc(a.patient_id) + ')</h3>' +
+      '<p><code>' + esc(a.alert_id) + '</code></p>';
+    (a.gaps || []).forEach(g => {
+      html += '<p>[' + esc(g.severity) + '] ' + esc(g.title) + '</p>';
+    });
+    html += previouslySentHtml(a) + '<p class="muted">Created: ' + esc(a.created_at) + '</p>' +
+      decisionButtons(a.alert_id) + '</div>';
+  });
+  document.getElementById("pending-list").innerHTML = html;
+}
+
+function setDecisionStatus(msg, kind) {
+  const el = document.getElementById("decision-status");
+  el.textContent = msg;
+  el.className = kind || "";
+}
+
+// The server's answer as JSON, or a plain error if it isn't JSON.
+async function readJson(res) {
+  try {
+    return await res.json();
+  } catch (e) {
+    throw new Error("The server had a problem (status " + res.status + ").");
+  }
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-action]");
+  if (b) decideAlert(b.dataset.alertId, b.dataset.action);
+});
+
+function setStatus(msg, kind) {
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = kind || "";
+}
+
+function llmMode() {
+  return document.querySelector('input[name="llm"]:checked').value;
+}
+
+async function loadPatients() {
+  try {
+    const res = await fetch("/api/patients");
+    const data = await res.json();
+    const list = document.getElementById("patient-list");
+    list.innerHTML = "";
+    data.patients.forEach((p, i) => {
+      const b = document.createElement("button");
+      b.className = "patient-btn";
+      b.textContent = p.name + " (" + p.id.toUpperCase() + ")";
+      b.onclick = () => selectPatient(p.id, b);
+      list.appendChild(b);
+      if (i === 0) selectPatient(p.id, b);
+    });
+  } catch (e) {
+    document.getElementById("patient-list").innerHTML =
+      '<span class="muted">Could not load patients — is the server running?</span>';
+  }
+}
+
+function selectPatient(id, btn) {
+  selectedPatient = id;
+  document.querySelectorAll(".patient-btn").forEach(b => b.classList.remove("selected"));
+  if (btn) btn.classList.add("selected");
+}
+
+function gapHtml(gap) {
+  const sev = (gap.severity || "").toLowerCase();
+  const badgeClass = sev === "soon" ? "soon" : sev === "routine" ? "routine" : "";
+  let ev = "";
+  (gap.evidence || []).forEach(e => {
+    ev += "<div>" + esc(e.resourceType) + "/" + esc(e.id) + " — " + esc(e.detail) + "</div>";
+  });
+  return '<div class="gap"><span class="badge ' + badgeClass + '">' + esc(gap.severity || "").toUpperCase() +
+    '</span><h3>' + esc(gap.title) + '</h3>' +
+    '<p>' + esc(gap.explanation || "") + '</p>' +
+    '<p class="detail">' + esc(gap.detail || "") + '</p>' +
+    '<div class="evidence">' + ev + '</div></div>';
+}
+
+async function runAgent() {
+  if (!selectedPatient) return;
+  const btn = document.getElementById("run-btn");
+  btn.disabled = true;
+  btn.textContent = "Running…";
+  setStatus("Running the agent on " + selectedPatient.toUpperCase() + "…", "");
+  try {
+    const res = await fetch("/api/run/" + encodeURIComponent(selectedPatient) +
+                            "?llm=" + encodeURIComponent(llmMode()),
+                            { method: "POST", headers: UI_HEADERS });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.detail || "Run failed.");
+    const card = document.getElementById("results-card");
+    card.style.display = "block";
+    document.getElementById("results-title").textContent =
+      "Results — " + data.patient_name + " (" + data.patient_id + ")";
+    let html = "";
+    draft = data.alert ? { alert: data.alert, state: "pending" } : null;
+    if (!data.gaps.length) {
+      html = '<p class="muted">No care gaps found. No alert written.</p>';
+    } else {
+      html = "<p><strong>" + data.gaps.length + " care gap(s) found.</strong></p>";
+      data.gaps.forEach(g => { html += gapHtml(g); });
+      if (draft) html += '<div class="alert-card" id="draft-alert"></div>';
+    }
+    document.getElementById("results").innerHTML = html;
+    renderDraft();
+    setStatus("Done.", "ok");
+    loadPending();
+  } catch (e) {
+    setStatus("Error: " + e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run agent";
+  }
+}
+
+async function loadPending() {
+  const request = ++pendingRequest;
+  try {
+    const res = await fetch("/api/alerts/pending");
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.detail || "Could not load.");
+    if (request !== pendingRequest) return;
+    pending = data.pending;
+    unreadable = data.unreadable || [];
+    // Decided from the list, another tab or the command line: the results
+    // card must not keep offering buttons.
+    if (draft && draft.state === "pending" && !inFlight.has(draft.alert.alert_id) &&
+        !pending.some(a => a.alert_id === draft.alert.alert_id)) {
+      draft.state = "gone";
+    }
+    renderDraft();
+    renderPending();
+  } catch (e) {
+    if (request !== pendingRequest) return;
+    document.getElementById("pending-list").innerHTML = '<span class="muted">Could not load pending alerts.</span>';
+  }
+}
+
+async function decideAlert(alertId, action) {
+  if (inFlight.has(alertId)) return;
+  let reason = "";
+  if (action === "reject") {
+    const answer = prompt("Reason for rejecting this alert?", "");
+    if (answer === null) return;  // Cancel: decide nothing
+    reason = answer;
+  }
+  inFlight.add(alertId);
+  setDecisionStatus("Saving the decision…", "");
+  renderDraft();
+  renderPending();
+  try {
+    const res = await fetch("/api/alerts/" + encodeURIComponent(alertId) + "/" + action, {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, UI_HEADERS),
+      body: JSON.stringify({ reason: reason })
+    });
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.detail || "Decision failed.");
+    if (draft && draft.alert.alert_id === alertId) draft.state = action;
+    pending = pending.filter(a => a.alert_id !== alertId);
+    setDecisionStatus(action === "approve" ? "Alert approved — moved to sent, audit log updated." : "Alert rejected — moved to rejected, audit log updated.", "ok");
+  } catch (e) {
+    setDecisionStatus("Error: " + e.message, "error");
+  } finally {
+    inFlight.delete(alertId);
+    renderDraft();
+    renderPending();
+    await loadPending();  // also after a failure: the list may be out of date
+  }
+}
+
+loadPatients();
+loadPending();
+</script>
+</body>
+</html>

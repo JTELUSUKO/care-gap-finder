@@ -1,6 +1,8 @@
 """The agent — a LangGraph StateGraph with four nodes.
 
     load_patient -> detect_gaps -> explain_gaps -> draft_alert
+                            \________________________/
+                              no gaps: skip explain_gaps
 
   * load_patient: reads the FHIR bundle for one patient (Data Sources).
   * detect_gaps:  runs the deterministic rules in gap_rules.py (Reason).
@@ -81,7 +83,10 @@ def _node_draft_alert(state):
     patient = fhir_loader.get_patient(state["bundle"])
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     suffix = uuid.uuid4().hex[:6]
-    alert_id = f"ALERT-{state['patient_id']}-{stamp}-{suffix}"
+    # FHIR ids may contain dots; alert ids (which become file names) may not.
+    # The alert's patient_id field keeps the real id.
+    safe_patient_id = state["patient_id"].replace(".", "-")
+    alert_id = f"ALERT-{safe_patient_id}-{stamp}-{suffix}"
     alert = {
         "alert_id": alert_id,
         "status": "pending",
@@ -93,8 +98,14 @@ def _node_draft_alert(state):
         "synthetic": True,
         "gaps": gaps,
     }
-    alerts.write_pending_alert(Path(state["alerts_dir"]), alert)
-    return {"alert": alert}
+    return {"alert": alerts.save_draft(Path(state["alerts_dir"]), alert)}
+
+
+def _after_detect(state):
+    """Explain only when there is something to explain. A patient with no
+    gaps goes straight to draft_alert, which records that no alert is
+    needed, so no explanation (and no Claude call) is ever made for them."""
+    return "explain_gaps" if state.get("gaps") else "draft_alert"
 
 
 def build_graph():
@@ -106,7 +117,9 @@ def build_graph():
     graph.add_node("draft_alert", _node_draft_alert)
     graph.set_entry_point("load_patient")
     graph.add_edge("load_patient", "detect_gaps")
-    graph.add_edge("detect_gaps", "explain_gaps")
+    graph.add_conditional_edges(
+        "detect_gaps", _after_detect, ["explain_gaps", "draft_alert"]
+    )
     graph.add_edge("explain_gaps", "draft_alert")
     graph.add_edge("draft_alert", END)
     return graph.compile()

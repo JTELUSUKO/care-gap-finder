@@ -1,3 +1,9 @@
 langgraph>=0.6
 langchain-core>=0.3
 pytest>=8.0
+# Web UI (server.py) — pinned to versions that support Python 3.8+,
+# so they install on a Python 3.9 Mac as well as newer versions.
+fastapi==0.115.6
+uvicorn==0.32.1
+# FastAPI's TestClient (tests/test_security.py) needs httpx.
+httpx>=0.24

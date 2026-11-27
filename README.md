@@ -32,7 +32,10 @@ agent runs entirely on your Mac with Python + LangGraph + pytest.
 ```
 care-gap-finder/
   app.py                  the command line: run, list, approve, reject
-  requirements.txt        langgraph, langchain-core, pytest
+  server.py               the web UI backend (FastAPI) — `python server.py`
+  static/index.html       the web UI page (one file, no build step)
+  UI-README.md            web UI walkthrough
+  requirements.txt        langgraph, langchain-core, pytest, fastapi, uvicorn, httpx
   care_gap/
     fhir_loader.py        read + query a FHIR bundle
     gap_rules.py          the four deterministic gap rules
@@ -41,7 +44,10 @@ care-gap-finder/
     alerts.py             the human approval queue
   data/patients/          5 synthetic FHIR bundles + README
   alerts/                 pending/ sent/ rejected/ audit.log
-  tests/test_care_gaps.py the pytest suite
+  tests/                  pytest suites: test_care_gaps.py (agent logic)
+                          + test_bundle_integrity.py (data reconciliation)
+                          + test_security.py (attack protections)
+                          + test_review_fixes.py (queue, API and page)
 ```
 
 ## Setup (macOS Terminal, one command at a time)
@@ -87,6 +93,19 @@ Expect: P001 one gap (blood pressure), P002 one gap (HbA1c overdue),
 P003 one gap (open cardiology referral), P004 one gap (colorectal
 screening overdue), P005 zero gaps. Four pending alerts, one per patient
 with a gap.
+
+## Web UI (added Nov 13, 2026)
+
+Same agent, with a screen — pick a patient, run the agent, read the
+gaps and explanations, approve or reject the draft alert with a button:
+
+```bash
+python server.py
+```
+
+Then open http://127.0.0.1:8000 in a browser. Full walkthrough in
+`UI-README.md`. The UI is the target the AI Testing track's Lesson 1
+scenarios run against.
 
 ## The approval flow (the Human in the Loop)
 
@@ -190,6 +209,9 @@ Expect **all tests to pass**. What each one proves:
   patient's name or MRN.
 - **Explanations are plain language** — every gap gets a real sentence
   naming the patient.
+- **Bundle integrity (reconciliation)** — all five bundles exist and
+  load, each holds exactly one Patient, the patient-ID set is complete
+  with no duplicates. A dropped or doubled patient fails here first.
 
 Tests write their alerts to temporary folders, so running the suite
 never pollutes the project's own `alerts/` folders.
@@ -198,13 +220,14 @@ never pollutes the project's own `alerts/` folders.
 
 - **LangGraph `interrupt()` instead of the CLI queue** — pause the graph
   itself at the approval step and resume it after the human decides.
-- **FastAPI + a simple web UI** — a page per patient, an Approve/Reject
-  button per alert, the audit log as a table.
+- **FastAPI + a simple web UI** — ✅ done Nov 13, 2026 (`server.py` +
+  `static/index.html`, walkthrough in `UI-README.md`).
 - **Chroma RAG over screening-guideline text** — let the agent quote the
   guideline (e.g. "USPSTF recommends screening ages 45–75") in its
   explanation, with the retrieved passage as extra evidence.
 - **Add a 6th patient** — copy `p005.json`, change the name/MRN/dates,
   and give them a gap the rules should catch; add one line to the test
-  table in `tests/test_care_gaps.py`.
+  table in `tests/test_care_gaps.py` and to `EXPECTED_FILES` /
+  `EXPECTED_PATIENT_IDS` in `tests/test_bundle_integrity.py`.
 - **A second measure** — add a rule for breast-cancer screening
   (mammogram) using the same pattern as the colorectal rule.

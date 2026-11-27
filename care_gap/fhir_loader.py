@@ -12,23 +12,36 @@ RxNorm, CPT) so the patterns transfer to real FHIR data.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
+
+# The FHIR R4 rule for resource ids. Use with fullmatch.
+FHIR_ID_RE = re.compile(r"[A-Za-z0-9.-]{1,64}")
 
 
 def load_bundle(path):
     """Load a patient bundle JSON file and validate its basic shape.
 
     Returns the bundle dict. Raises ValueError with a plain message if the
-    file is not a Bundle or contains no Patient resource.
+    file is not a Bundle, contains no Patient resource, or the Patient's id
+    is not a valid FHIR id. Checking the id here means a bad record fails
+    straight away, before any explanation is drafted.
     """
     path = Path(path)
     with path.open(encoding="utf-8") as f:
         bundle = json.load(f)
     if not isinstance(bundle, dict) or bundle.get("resourceType") != "Bundle":
         raise ValueError(f"{path.name}: expected a FHIR Bundle JSON file.")
-    if get_patient(bundle) is None:
+    patient = get_patient(bundle)
+    if patient is None:
         raise ValueError(f"{path.name}: bundle contains no Patient resource.")
+    patient_id = patient.get("id")
+    if not isinstance(patient_id, str) or not FHIR_ID_RE.fullmatch(patient_id):
+        raise ValueError(
+            f"{path.name}: Invalid patient id {patient_id!r} — a FHIR id has "
+            "1-64 letters, digits, hyphens or dots."
+        )
     return bundle
 
 

@@ -54,6 +54,7 @@ def _print_run(result, patient_path):
             print(f"    evidence: {ev['resourceType']}/{ev['id']} — {ev['detail']}")
     alert = result.get("alert")
     if alert:
+        _print_previously_sent(alert, indent="\n")
         print(
             f"\nDraft alert written to alerts/pending/{alert['alert_id']}.json"
             "\nIt has NOT been sent. Review it with --list-pending, then"
@@ -62,30 +63,42 @@ def _print_run(result, patient_path):
 
 
 def _run_one(patient_path, as_of, llm_mode):
+    """Run one patient and print the result. Returns False on an error."""
     try:
         result = agent.run_agent(
             patient_path, alerts_dir=ALERTS_DIR, as_of=as_of, llm_mode=llm_mode
         )
-    except (ValueError, RuntimeError) as exc:
-        # A clear one-line error beats a traceback for a missing file,
-        # a bad bundle, or a missing `claude` CLI.
+    except (ValueError, RuntimeError, OSError) as exc:
+        # A clear one-line error beats a traceback for a missing or
+        # unreadable file, a bad bundle, or a missing `claude` CLI.
         print(f"\nError: {exc}")
-        raise SystemExit(1)
+        return False
     _print_run(result, patient_path)
+    return True
+
+
+def _print_previously_sent(alert, indent):
+    sent = alerts.previously_sent(ALERTS_DIR, alert)
+    if sent:
+        print(f"{indent}NOTE: an alert for the same gap(s) was already "
+              f"approved ({sent}).")
 
 
 def _list_pending():
-    pending = alerts.list_pending(ALERTS_DIR)
+    pending, unreadable = alerts.list_pending_with_errors(ALERTS_DIR)
+    for name in unreadable:
+        print(f"Warning: alerts/pending/{name} could not be read — skipped.")
     if not pending:
         print("No pending alerts. Run the agent first (see --patient).")
         return
     print(f"{len(pending)} pending alert(s) — waiting for a human decision:\n")
     for alert in pending:
         print(f"  {alert['alert_id']}")
-        print(f"    Patient: {alert['patient_name']} ({alert['patient_id']})")
-        for gap in alert["gaps"]:
-            print(f"    - [{gap['severity']}] {gap['title']}")
-        print(f"    Created: {alert['created_at']}\n")
+        print(f"    Patient: {alert.get('patient_name')} ({alert.get('patient_id')})")
+        for gap in alert.get("gaps", []):
+            print(f"    - [{gap.get('severity')}] {gap.get('title')}")
+        _print_previously_sent(alert, indent="    ")
+        print(f"    Created: {alert.get('created_at')}\n")
 
 
 def main(argv=None):
@@ -135,12 +148,14 @@ def main(argv=None):
         )
         return 0
     if args.all:
-        for path in sorted(PATIENTS_DIR.glob("p*.json")):
+        # One bad record must not stop the patients after it.
+        results = [
             _run_one(path, as_of, llm_mode)
-        return 0
+            for path in sorted(PATIENTS_DIR.glob("p*.json"))
+        ]
+        return 0 if all(results) else 1
     if args.patient:
-        _run_one(args.patient, as_of, llm_mode)
-        return 0
+        return 0 if _run_one(args.patient, as_of, llm_mode) else 1
     parser.print_help()
     return 0
 
